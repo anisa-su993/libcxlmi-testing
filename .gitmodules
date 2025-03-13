@@ -1,0 +1,3 @@
+[submodule "cxl_test_tool"]
+	path = cxl_test_tool
+	url = https://github.com/moking/cxl-test-tool.git
