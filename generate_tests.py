@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 import subprocess
 import shlex
+import argparse
 from parse_docs import parse_markdown_for_opcode_map
 
 PREFIX = """#include <stdio.h>
@@ -288,11 +289,20 @@ def run_command(command):
     except:
         print("Error")
 
-# Example usage of the script
-if __name__ == "__main__":
-    input_file = "commands.xml"
+def add_args(parser):
+    parser.add_argument('input', type=str, nargs='?',
+                        default="commands.xml",
+                        help='Path to the XML file containing commands')
+    parser.add_argument('-o', '--output', type=str, required=False,
+                        default="output.c",
+                        help='Output C file name')
+    parser.add_argument('-f', '--fatal', action='store_true', required=False,
+                        help='Stop execution on assertion failure')
 
-    root = load_xml_from_file(input_file)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    add_args(parser)
+    args = parser.parse_args()
 
     opcode_map = {}
     opcode_map = parse_markdown_for_opcode_map("./libcxlmi/docs/Generic-Component-Commands.md")
@@ -308,7 +318,13 @@ if __name__ == "__main__":
             f.write("\n")
     print("Opcode Info dumped to opcode_map.txt")
 
-    output_file = f"test.c"
+    input_file = args.input
+    output_file = args.output
+    root = load_xml_from_file(input_file)
+
+    if args.fatal:
+        ASSERT_TYPE = "ASSERT_EQUAL_FATAL"
+
     generate_test_file(output_file, root)
 
     print(f"Code has been written to {output_file}")
