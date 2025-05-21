@@ -1,8 +1,8 @@
 import xml.etree.ElementTree as ET
-import subprocess
-import shlex
 import argparse
 from parse_docs import parse_markdown_for_opcode_map
+from topo import TOPOLOGIES
+from utils import tools, mctp, cxl, config
 
 PREFIX = """#include <stdio.h>
 #include <stdlib.h>
@@ -275,19 +275,26 @@ def generate_test_file(filename, root):
         # Write the footer to the file
         f.write(FOOTER)
 
-def run_command(command):
-    print(f"Running command: {command}")
-    argv = shlex.split(command)
+def install_libcxlmi(target_dir="./libcxlmi"):
+    url = tools.system_env("libcxlmi_url") or 'https://github.com/computexpresslink/libcxlmi'
+    branch = tools.system_env("libcxlmi_branch") or 'main'
 
-    try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+    if tools.path_exist_on_vm(target_dir):
+        print("INFO: libcxlmi already exists, skip clone")
+        return 0
 
-        print("STDOUT:")
-        print(result.stdout)
-        print("STDERR:")
-        print(result.stderr)
-    except:
-        print("Error")
+    tools.install_packages_on_vm("meson libdbus-1-dev git cmake locales")
+    cmd="git clone -b %s --single-branch %s %s"%(branch, url, target_dir)
+    tools.execute_on_vm(cmd, echo=True)
+    cmd="cd %s; meson setup -Dlibdbus=enabled build; meson compile -C build;"%target_dir
+    tools.execute_on_vm(cmd, echo=True)
+
+    if tools.path_exist_on_vm(target_dir):
+        print("INFO: Install libcxlmi succeeded")
+        return 0
+
+    print("ERROR: Install libcxlmi failed!")
+    return -1
 
 def add_args(parser):
     parser.add_argument('input', type=str, nargs='?',
@@ -304,6 +311,7 @@ if __name__ == "__main__":
     add_args(parser)
     args = parser.parse_args()
 
+    # Map opcode to its req/rsp structs and function name
     opcode_map = {}
     opcode_map = parse_markdown_for_opcode_map("./libcxlmi/docs/Generic-Component-Commands.md")
     opcode_map.update(parse_markdown_for_opcode_map("./libcxlmi/docs/Memory-Device-Commands.md"))
@@ -318,6 +326,7 @@ if __name__ == "__main__":
             f.write("\n")
     print("Opcode Info dumped to opcode_map.txt")
 
+    # Generate C test code
     input_file = args.input
     output_file = args.output
     root = load_xml_from_file(input_file)
@@ -328,3 +337,40 @@ if __name__ == "__main__":
     generate_test_file(output_file, root)
 
     print(f"Code has been written to {output_file}")
+
+    # Set up cxl-test-tool
+    config.parse_config('./.vars.config')
+
+    QEMU_IMG=tools.system_path("QEMU_ROOT")+"/build/qemu-system-x86_64"
+    KERNEL_IMG=tools.system_path("KERNEL_ROOT")+"/arch/x86/boot/bzImage"
+    CXL_TEST_TOOL_DIR=tools.system_env("CXL_TEST_TOOL_DIR")
+
+    # Start VMs and run test code
+    libcxlmi_incl = './libcxlmi/src'
+    libcxlmi_bin = './libcxlmi/build/src'
+    for topo, topo_info in TOPOLOGIES.items():
+        remote_output = 'test-' + topo.lower().replace('_', '-')
+        compile_str = f'gcc /tmp/{remote_output}.c -I{libcxlmi_incl} -L{libcxlmi_bin} -lcxlmi -o /tmp/{remote_output}'
+        tools.run_qemu(topo=topo_info["topo_str"], kernel=KERNEL_IMG, qemu=QEMU_IMG)
+        print('-------------------------------------------------')
+        if topo_info["has_mctp"]:
+            mctp.mctp_setup(CXL_TEST_TOOL_DIR + "/test-workflows/mctp.sh")
+            print('-------------------------------------------------')
+        cxl.load_driver()
+        print('-------------------------------------------------')
+        install_libcxlmi(target_dir='./libcxlmi')
+        print('-------------------------------------------------')
+        tools.copy_to_remote(output_file, dst=f"/tmp/{remote_output}.c")
+        print('-------------------------------------------------')
+        print(tools.execute_on_vm(compile_str, echo=True))
+        print('-------------------------------------------------')
+
+        with open(f"./{remote_output}-results.txt", 'w') as f:
+            f.write(f"Test results for {topo}:\n")
+            f.write("------------------------------------\n")
+            f.write(tools.execute_on_vm(f'/tmp/{remote_output}', echo=True))
+            print('Results for %s written to %s-results.txt' % (topo, remote_output))
+
+        print('Shutting down VM...')
+        tools.shutdown_vm()
+        print('-------------------------------------------------')
